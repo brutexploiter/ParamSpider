@@ -4,8 +4,9 @@ import logging
 import colorama
 from colorama import Fore, Style
 from . import client  # Importing client from a module named "client"
-from urllib.parse import urlparse, parse_qs, urlencode
-import os
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+import requests
+from collections import defaultdict
 
 yellow_color_code = "\033[93m"
 reset_color_code = "\033[0m"
@@ -55,13 +56,14 @@ def clean_url(url):
 
     return parsed_url.geturl()
 
-def clean_urls(urls, extensions, placeholder):
+def clean_urls(urls, extensions, placeholder=None):
     """
     Clean a list of URLs by removing unnecessary parameters and query strings.
 
     Args:
         urls (list): List of URLs to clean.
         extensions (list): List of file extensions to check against.
+        placeholder (str): Placeholder for parameter values. If None, keep the original values.
 
     Returns:
         list: List of cleaned URLs.
@@ -72,13 +74,67 @@ def clean_urls(urls, extensions, placeholder):
         if not has_extension(cleaned_url, extensions):
             parsed_url = urlparse(cleaned_url)
             query_params = parse_qs(parsed_url.query)
-            cleaned_params = {key: placeholder for key in query_params}
+            if placeholder:
+                cleaned_params = {key: placeholder for key in query_params}
+            else:
+                cleaned_params = query_params
             cleaned_query = urlencode(cleaned_params, doseq=True)
             cleaned_url = parsed_url._replace(query=cleaned_query).geturl()
             cleaned_urls.add(cleaned_url)
     return list(cleaned_urls)
 
-def fetch_and_clean_urls(domain, extensions, stream_output,proxy, placeholder):
+def merge_parameters(urls):
+    """
+    Merge parameters for the same endpoint into a single URL.
+
+    Args:
+        urls (list): List of URLs to process.
+
+    Returns:
+        list: List of merged URLs.
+    """
+    endpoint_params = defaultdict(dict)
+    for url in urls:
+        parsed_url = urlparse(url)
+        params = parse_qs(parsed_url.query)
+        endpoint = urlunparse(parsed_url._replace(query=""))
+
+        for key, value in params.items():
+            if key in endpoint_params[endpoint]:
+                endpoint_params[endpoint][key].update(value)
+            else:
+                endpoint_params[endpoint][key] = set(value)
+
+    merged_urls = []
+    for endpoint, params in endpoint_params.items():
+        merged_query = urlencode({key: list(values)[0] for key, values in params.items()}, doseq=True)
+        merged_urls.append(urlunparse(urlparse(endpoint)._replace(query=merged_query)))
+
+    return merged_urls
+
+def fetch_url_content(url, proxy):
+    """
+    Fetch the content of the given URL.
+
+    Args:
+        url (str): The URL to fetch.
+        proxy (str): The proxy address to use for the request.
+
+    Returns:
+        response: The HTTP response object.
+    """
+    try:
+        if proxy:
+            response = requests.get(url, proxies={'http': proxy, 'https': proxy})
+        else:
+            response = requests.get(url)
+        response.raise_for_status()
+        return response
+    except requests.RequestException as e:
+        logging.error(f"Error fetching URL {url}: {e}")
+        return None
+
+def fetch_and_clean_urls(domain, extensions, stream_output, proxy, placeholder=None, output_file=None):
     """
     Fetch and clean URLs related to a specific domain from the Wayback Machine.
 
@@ -86,59 +142,69 @@ def fetch_and_clean_urls(domain, extensions, stream_output,proxy, placeholder):
         domain (str): The domain name to fetch URLs for.
         extensions (list): List of file extensions to check against.
         stream_output (bool): True to stream URLs to the terminal.
+        proxy (str): Proxy address for web requests.
+        placeholder (str): Placeholder for parameter values. If None, keep the original values.
+        output_file (str): Output file to save the cleaned URLs.
 
     Returns:
         None
     """
     logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Fetching URLs for {Fore.CYAN + domain + Style.RESET_ALL}")
     wayback_uri = f"https://web.archive.org/cdx/search/cdx?url={domain}/*&output=txt&collapse=urlkey&fl=original&page=/"
-    response = client.fetch_url_content(wayback_uri,proxy)
-    urls = response.text.split()
+    response = fetch_url_content(wayback_uri, proxy)
+    if response is None:
+        logging.error(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Failed to fetch URLs for {domain}")
+        return
     
+    urls = response.text.split()
     logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(urls)) + Style.RESET_ALL} URLs for {Fore.CYAN + domain + Style.RESET_ALL}")
     
     cleaned_urls = clean_urls(urls, extensions, placeholder)
     logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Cleaning URLs for {Fore.CYAN + domain + Style.RESET_ALL}")
     logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(cleaned_urls)) + Style.RESET_ALL} URLs after cleaning")
-    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Extracting URLs with parameters")
     
-    results_dir = "results"
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
+    merged_urls = merge_parameters(cleaned_urls)
+    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Merging parameters for {Fore.CYAN + domain + Style.RESET_ALL}")
+    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(merged_urls)) + Style.RESET_ALL} URLs after merging")
 
-    result_file = os.path.join(results_dir, f"{domain}.txt")
-
-    with open(result_file, "w") as f:
-        for url in cleaned_urls:
-            if "?" in url:
+    if output_file:
+        mode = 'a' if os.path.exists(output_file) else 'w'
+        with open(output_file, mode) as f:
+            for url in merged_urls:
                 f.write(url + "\n")
                 if stream_output:
                     print(url)
+        logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Saved cleaned URLs to {Fore.CYAN + output_file + Style.RESET_ALL}")
+    else:
+        for url in merged_urls:
+            if stream_output:
+                print(url)
     
-    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Saved cleaned URLs to {Fore.CYAN + result_file + Style.RESET_ALL}")
-
 def main():
     """
     Main function to handle command-line arguments and start URL mining process.
     """
     log_text = """
-           
                                       _    __       
    ___  ___ ________ ___ _  ___ ___  (_)__/ /__ ____
   / _ \/ _ `/ __/ _ `/  ' \(_-</ _ \/ / _  / -_) __/
- / .__/\_,_/_/  \_,_/_/_/_/___/ .__/_/\_,_/\__/_/   
+/ .__/\_,_/_/  \_,_/_/_/_/___/ .__/_/\_,_/\__/_/   
 /_/                          /_/                    
 
                               with <3 by @0xasm0d3us           
     """
     colored_log_text = f"{yellow_color_code}{log_text}{reset_color_code}"
     print(colored_log_text)
-    parser = argparse.ArgumentParser(description="Mining URLs from dark corners of Web Archives ")
+    
+    parser = argparse.ArgumentParser(description="Mining URLs from dark corners of Web Archives")
     parser.add_argument("-d", "--domain", help="Domain name to fetch related URLs for.")
     parser.add_argument("-l", "--list", help="File containing a list of domain names.")
     parser.add_argument("-s", "--stream", action="store_true", help="Stream URLs on the terminal.")
-    parser.add_argument("--proxy", help="Set the proxy address for web requests.",default=None)
-    parser.add_argument("-p", "--placeholder", help="placeholder for parameter values", default="FUZZ")
+    parser.add_argument("--proxy", help="Set the proxy address for web requests.", default=None)
+    parser.add_argument("-p", "--placeholder", help="Placeholder for parameter values. If not provided, original values are kept.", default=None)
+    parser.add_argument("-e", "--extensions", nargs='+', default=HARDCODED_EXTENSIONS, help="List of file extensions to exclude.")
+    parser.add_argument("-o", "--output", help="Output file to save the cleaned URLs.")
+
     args = parser.parse_args()
 
     if not args.domain and not args.list:
@@ -147,22 +213,24 @@ def main():
     if args.domain and args.list:
         parser.error("Please provide either the -d option or the -l option, not both.")
 
+    domains = []
     if args.list:
-        with open(args.list, "r") as f:
-            domains = [line.strip().lower().replace('https://', '').replace('http://', '') for line in f.readlines()]
-            domains = [domain for domain in domains if domain]  # Remove empty lines
-            domains = list(set(domains))  # Remove duplicates
+        try:
+            with open(args.list, "r") as f:
+                domains = [line.strip().lower().replace('https://', '').replace('http://', '') for line in f.readlines()]
+                domains = [domain for domain in domains if domain]  # Remove empty lines
+                domains = list(set(domains))  # Remove duplicates
+        except Exception as e:
+            logging.error(f"Error reading domain list file: {e}")
+            return
     else:
-        domain = args.domain
+        domains.append(args.domain)
 
-    extensions = HARDCODED_EXTENSIONS
+    extensions = args.extensions
 
-    if args.domain:
-        fetch_and_clean_urls(domain, extensions, args.stream, args.proxy, args.placeholder)
-
-    if args.list:
-        for domain in domains:
-            fetch_and_clean_urls(domain, extensions, args.stream,args.proxy, args.placeholder)
+    for domain in domains:
+        output_file = args.output if args.output else f"{domain}.txt"
+        fetch_and_clean_urls(domain, extensions, args.stream, args.proxy, args.placeholder, output_file)
 
 if __name__ == "__main__":
     main()
