@@ -113,8 +113,6 @@ def merge_parameters(urls):
 
     return merged_urls
 
-import time
-
 def fetch_url_content(url, proxy, max_retries=5):
     """
     Fetch the content of the given URL with retry mechanism.
