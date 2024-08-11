@@ -7,6 +7,7 @@ from . import client  # Importing client from a module named "client"
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import requests
 from collections import defaultdict
+import time
 
 yellow_color_code = "\033[93m"
 reset_color_code = "\033[0m"
@@ -112,27 +113,39 @@ def merge_parameters(urls):
 
     return merged_urls
 
-def fetch_url_content(url, proxy):
+import time
+
+def fetch_url_content(url, proxy, max_retries=5):
     """
-    Fetch the content of the given URL.
+    Fetch the content of the given URL with retry mechanism.
 
     Args:
         url (str): The URL to fetch.
         proxy (str): The proxy address to use for the request.
+        max_retries (int): Maximum number of retries in case of failure.
 
     Returns:
-        response: The HTTP response object.
+        response: The HTTP response object or None if all retries fail.
     """
-    try:
-        if proxy:
-            response = requests.get(url, proxies={'http': proxy, 'https': proxy})
-        else:
-            response = requests.get(url)
-        response.raise_for_status()
-        return response
-    except requests.RequestException as e:
-        logging.error(f"Error fetching URL {url}: {e}")
-        return None
+    retries = 0
+    wait_time = 10  # Initial wait time in seconds
+
+    while retries < max_retries:
+        try:
+            if proxy:
+                response = requests.get(url, proxies={'http': proxy, 'https': proxy})
+            else:
+                response = requests.get(url)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as e:
+            retries += 1
+            logging.error(f"Error fetching URL {url}: {e}. Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+            wait_time += 5  # Increase wait time for each retry
+    
+    logging.error(f"Failed to fetch URL {url} after {max_retries} retries.")
+    return None
 
 def fetch_and_clean_urls(domain, extensions, stream_output, proxy, placeholder=None, output_file=None):
     """
